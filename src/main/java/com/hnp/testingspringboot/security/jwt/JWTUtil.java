@@ -11,6 +11,10 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Component;
 
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
+import java.time.temporal.TemporalUnit;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
@@ -19,60 +23,54 @@ import java.util.Optional;
 @Component
 public class JWTUtil {
 
-    // 1 minute = 60000 ms
-    private static final long EXPIRE_DATE = 1*60000;
+    private static final int EXPIRE_MINUTES = 1;
 
     @Value("${securiry.jwt.secret}")
     private String secretKey;
 
     @Autowired
-    private RedisTemplate redisTemplate;
+    private RedisTemplate<String, Object> redisTemplate;
 
     @Autowired
     private TokenStoreRepository tokenStoreRepository;
 
 
     public String generateToken(User user) {
+        return getTokenStore(user).map(TokenStore::getToken)
+                .orElse(claimNewToken(user));
+    }
 
-
-        TokenStore tokenStore = getTokenStroe(user);
-
-        if(tokenStore != null) {
-            return tokenStore.getToken();
-        }
-
-
-        Map<String, Object> claims = new HashMap<>();
-        Date expireDate = new Date(System.currentTimeMillis() + EXPIRE_DATE);
-        String token = Jwts.builder().setClaims(claims).setSubject(user.getUsername())
-                .setIssuedAt(new Date(System.currentTimeMillis()))
+    private String claimNewToken(final User user) {
+        final Map<String, Object> claims = new HashMap<>();
+        final Date expireDate = Date.from(LocalDateTime.now().plusMinutes(EXPIRE_MINUTES).atZone(ZoneId.systemDefault()).toInstant());
+        final String token = Jwts.builder().setClaims(claims).setSubject(user.getUsername())
+                .setIssuedAt(new Date())
                 .setExpiration(expireDate)
                 .signWith(SignatureAlgorithm.HS512, secretKey).compact();
 
-        TokenStore newTokenStore = new TokenStore();
+        final TokenStore newTokenStore = new TokenStore();
         newTokenStore.setToken(token);
         newTokenStore.setUsername(user.getUsername());
         newTokenStore.setExpireDate(expireDate);
+
         this.tokenStoreRepository.save(newTokenStore);
+
         return token;
     }
 
-    public boolean validateToken(String token) {
+    public boolean validateToken(TokenStore tokenStore) {
         try {
-            Jwts.parser().setSigningKey(secretKey).parseClaimsJws(token);
-            return getExpireDateFromToken(token).after(new Date());
+            Jwts.parser().setSigningKey(secretKey).parseClaimsJws(tokenStore.getToken());
+            return getExpireDateFromToken(tokenStore.getToken()).after(new Date());
         } catch (Exception e) {
             return false;
         }
     }
 
     public boolean validateTokenForAccess(String token) {
-
-        Optional<TokenStore> tokenStoreOptional = this.tokenStoreRepository.findById(token);
-        if(tokenStoreOptional.isEmpty()) {
-            return false;
-        }
-        return validateToken(token);
+        return this.tokenStoreRepository.findById(token)
+                .map(this::validateToken)
+                .orElse(false);
     }
 
     public String getUsernameFromToken(String token) {
@@ -87,39 +85,12 @@ public class JWTUtil {
         return Jwts.parser().setSigningKey(secretKey).parseClaimsJws(token).getBody();
     }
 
-    public TokenStore getTokenStroe(User user) {
-        Optional<TokenStore> tokenStoreOptional =
-                this.tokenStoreRepository.findByUsername(user.getUsername());
-
-
-        if(tokenStoreOptional.isEmpty()) {
-            return null;
-        }
-
-        TokenStore tokenStore = tokenStoreOptional.get();
-
-        String token = tokenStore.getToken();
-
-        if(validateToken(token)) {
-            return tokenStore;
-        }
-        this.tokenStoreRepository.deleteById(token);
-        return null;
-
-//        try {
-//            if(getExpireDateFromToken(token).after(new Date())) {
-//
-//            } else {
-//                return null;
-//            }
-//        } catch (ExpiredJwtException e) {
-//            return null;
-//        }
-
-
-
-
+    public Optional<TokenStore> getTokenStore(User user) {
+        return tokenStoreRepository.findByUsername(user.getUsername())
+                .filter(this::validateToken)
+                .map(tokenStore -> {
+                    tokenStoreRepository.deleteById(tokenStore.getToken());
+                    return null;
+                });
     }
-
-
 }
